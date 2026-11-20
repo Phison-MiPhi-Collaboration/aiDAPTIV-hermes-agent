@@ -1,7 +1,14 @@
 # Source this file to sync and apply the PM environment; deactivate restores it.
 # Trusts the recorded tool digest. `hermes pm install` re-checks the bytes.
 # -TestExtras a,b selects runtime extras in the test environment (default: [all]).
-param([string]$TestExtras = '')
+# aiDAPTIV+: when <HERMES_HOME>\config.yaml does not exist yet (it is gitignored,
+# so a fresh clone has none), it is created from cli-config.yaml.example with
+# aiDAPTIV+ as the default provider. An existing config.yaml is never changed.
+# Global `hermes`: this checkout's launcher folder (.hermes\bin) is put on the
+# User PATH, so every new console can run `hermes` from any folder and with any
+# venv active (the launcher uses Hermes's own Python and keeps the current
+# folder). -NoGlobal skips that registration.
+param([string]$TestExtras = '', [switch]$NoGlobal)
 $ErrorActionPreference = 'Stop'
 
 $OutputEncoding = [System.Console]::OutputEncoding = [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -70,10 +77,124 @@ foreach ($key in $global:_hermesKeys) {
 foreach ($property in $composed.PSObject.Properties) {
     Set-Item -Path "env:$($property.Name)" -Value ([string]$property.Value)
 }
+
+# ---------------------------------------------------------------------------
+# aiDAPTIV+ default config. Hermes reads <HERMES_HOME>\config.yaml; on Windows
+# HERMES_HOME defaults to %LOCALAPPDATA%\hermes (hermes_constants.py).
+# ---------------------------------------------------------------------------
+$hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes$($env:HERMES_DATA_DIR_SUFFIX)" }
+$configPath = Join-Path $hermesHome 'config.yaml'
+$templatePath = Join-Path $repo 'cli-config.yaml.example'
+if (Test-Path -LiteralPath $configPath) {
+    # custom_providers "- name: aiDAPTIV", or a named "providers: aiDAPTIV:" block
+    if (-not (Select-String -LiteralPath $configPath -Pattern '^\s+(- name: )?aiDAPTIV:?\s*$' -Quiet)) {
+        Write-Host "activate: $configPath exists and has no aiDAPTIV provider; left unchanged" -ForegroundColor Yellow
+    }
+} elseif (-not (Test-Path -LiteralPath $templatePath)) {
+    Write-Host "activate: $templatePath not found; config.yaml not created" -ForegroundColor Yellow
+} else {
+    New-Item -ItemType Directory -Force -Path $hermesHome | Out-Null
+    $text = [IO.File]::ReadAllText($templatePath)
+    if ($text -match '(?m)^\s+- name: aiDAPTIV\s*$') {
+        # The aiDAPTIV+ edition of the template: use it as it is.
+        Copy-Item -LiteralPath $templatePath -Destination $configPath
+    } else {
+        # Stock upstream template: add the same aiDAPTIV+ defaults the
+        # aiDAPTIV+ edition carries (model section + custom_providers entry).
+        $aidaptivUrl = 'http://localhost:8080/v1'
+        $aidaptivModel = 'gemma-4-26B-A4B-it-UD-Q4_K_M.gguf'
+        $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $lines = [Collections.Generic.List[string]]($text -split "\r?\n")
+
+        # model: section. Only its first-level keys (two-space indent) are
+        # touched; the section ends at the next top-level key.
+        $start = $lines.IndexOf('model:')
+        if ($start -lt 0) { $lines.Insert(0, 'model:'); $start = 0 }
+        $end = $start + 1
+        while ($end -lt $lines.Count -and $lines[$end] -notmatch '^[A-Za-z_]') { $end++ }
+        $modelKeys = [ordered]@{
+            default  = "  default: `"$aidaptivModel`""
+            provider = '  provider: "custom"'
+            base_url = "  base_url: `"$aidaptivUrl`""
+        }
+        foreach ($key in @($modelKeys.Keys)) {
+            $found = $false
+            for ($i = $start + 1; $i -lt $end; $i++) {
+                if ($lines[$i] -match "^  ${key}:") { $lines[$i] = $modelKeys[$key]; $found = $true; break }
+            }
+            if (-not $found) { $lines.Insert($start + 1, $modelKeys[$key]); $end++ }
+        }
+
+        # custom_providers entry. Join an existing top-level custom_providers:
+        # list (a second key would be a duplicate-key YAML error), else add one.
+        $entry = @(
+            '  - name: aiDAPTIV',
+            "    base_url: $aidaptivUrl",
+            "    model: $aidaptivModel",
+            '    models:',
+            "      ${aidaptivModel}:",
+            '        context_length: 64000',
+            '    extra_body:',
+            '      cache_prompt: true',
+            '      offload_folder_name: "Hermes"',
+            '      chat_template_kwargs:',
+            '        enable_thinking: true'
+        )
+        $listAt = $lines.IndexOf('custom_providers:')
+        if ($listAt -ge 0) {
+            $lines.InsertRange($listAt + 1, [string[]]$entry)
+        } else {
+            while ($lines.Count -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
+            $lines.AddRange([string[]](@('', '# aiDAPTIV+ (added by activate.ps1)', 'custom_providers:') + $entry + @('')))
+        }
+        # UTF-8 without BOM, like the template.
+        [IO.File]::WriteAllText($configPath, ($lines -join $nl), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    Write-Host "activate: created $configPath with aiDAPTIV+ as the default provider" -ForegroundColor Green
+}
+# ---------------------------------------------------------------------------
+# Global `hermes`: register <repo>\.hermes\bin on the User PATH (once; later
+# runs find it present). Uses Hermes's own helper, which keeps the PATH value's
+# registry type (%VARS% stay expandable), matches case-insensitively and
+# notifies Windows. Takes effect in NEW consoles; this one uses the function below.
+# ---------------------------------------------------------------------------
+$launcherDir = Join-Path $repo '.hermes\bin'
+$launcherExe = @('hermes.exe', 'hermes.cmd') | ForEach-Object { Join-Path $launcherDir $_ } |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($NoGlobal) {
+    # Skipped on request.
+} elseif (-not $launcherExe) {
+    Write-Host "activate: no launcher in $launcherDir; global hermes not registered (run setup-hermes.ps1)" -ForegroundColor Yellow
+} else {
+    $priorPath = $env:PYTHONPATH
+    $priorHome = $env:PYTHONHOME
+    $priorPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns redirected native stderr into a
+        # terminating error under 'Stop'; the exit code is checked instead.
+        $ErrorActionPreference = 'Continue'
+        $env:PYTHONPATH = $repo
+        Remove-Item env:PYTHONHOME -ErrorAction SilentlyContinue
+        $register = 'import sys; from pathlib import Path; from hermes_cli._launchers import _register_windows_user_path as r; print(r(Path(sys.argv[1])))'
+        $state = (& $py -c $register $launcherDir 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "activate: could not add $launcherDir to the User PATH: $state" -ForegroundColor Yellow
+        } elseif ($state -eq 'added') {
+            Write-Host "activate: added $launcherDir to the User PATH; open a new console to use hermes from any folder" -ForegroundColor Green
+        }
+    } finally {
+        $ErrorActionPreference = $priorPreference
+        if ($null -eq $priorPath) { Remove-Item env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $priorPath }
+        if ($null -eq $priorHome) { Remove-Item env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $priorHome }
+    }
+}
+
 # This checkout, not whichever `hermes` PATH finds. A function beats PATH,
-# an alias, and the MSIX execution alias. It runs only while the shell is
-# inside this worktree.
+# an alias, and the MSIX execution alias. Inside this worktree it runs the
+# checkout's venv (dev mode); outside it runs the checkout's launcher from the
+# current folder, so a project's AGENTS.md, terminal cwd and venv apply.
 $global:_hermesWorktree = $repo
+$global:_hermesLauncher = $launcherExe
 # The branch names the worktree. A checkout cannot share a branch with another.
 # git's "not a repository" is not an activation failure: the directory name is
 # the label, and the command still refuses outside this tree.
@@ -104,8 +225,13 @@ function global:_hermesWorktreeHere {
 
 function global:hermes {
     if (-not (_hermesWorktreeHere)) {
+        # Outside the checkout: run its launcher here, without changing folder.
+        if ($global:_hermesLauncher -and (Test-Path -LiteralPath $global:_hermesLauncher)) {
+            & $global:_hermesLauncher @args
+            return
+        }
         $here = (Get-Location).Path
-        Write-Error "hermes: $here is outside $($global:_hermesWorktree); refusing (the installed command is hidden while this checkout is active)" -ErrorAction Continue
+        Write-Error "hermes: $here is outside $($global:_hermesWorktree) and $($global:_hermesWorktree)\.hermes\bin has no launcher; run setup-hermes.ps1" -ErrorAction Continue
         $global:LASTEXITCODE = 1
         return
     }
@@ -149,7 +275,9 @@ function global:deactivate {
     }
     $global:_hermesKeys = $null
     $global:_hermesSaved = $null
+    # The User PATH entry stays: global `hermes` is meant to outlive activation.
     $global:_hermesWorktree = $null
+    $global:_hermesLauncher = $null
     $global:_hermesWorktreeName = $null
     $global:_hermesSavedPrompt = $null
     Remove-Item function:deactivate, function:hermes, function:_hermesWorktreeHere -ErrorAction SilentlyContinue

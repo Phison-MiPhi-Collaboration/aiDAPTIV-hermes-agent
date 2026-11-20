@@ -1,4 +1,9 @@
-# Hermes Agent CLI Configuration
+# Hermes Agent CLI Configuration — aiDAPTIV+ edition
+# Same as the stock cli-config.yaml.example, plus the aiDAPTIV+ defaults the
+# Hermes + WrenAI setup runs with (lines marked "aiDAPTIV+"): the local
+# aiDAPTIV+ llama-server as the default model, a trimmed CLI toolset, and
+# compression/memory off so the prompt prefix stays stable for KV-cache reuse.
+# activate.ps1 copies this file to <HERMES_HOME>\config.yaml when none exists.
 # Copy settings from this example into ~/.hermes/config.yaml, or use
 # `hermes config set <section.key> <value>` to update the active profile.
 # This file configures CLI behavior; only documented secret environment
@@ -7,7 +12,7 @@
 # Schema version of this file. The installers copy it to seed config.yaml, and
 # `hermes update` uses it to know which one-time migrations the file already
 # has. Hermes manages it: do not copy it into another config.
-_config_version: 54
+_config_version: 53
 
 # =============================================================================
 # Database Configuration
@@ -78,8 +83,8 @@ plugins:
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
-  
+  default: "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"   # aiDAPTIV+: model loaded in llama-server
+
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)
   #   "openrouter"   - OpenRouter (requires: OPENROUTER_API_KEY or OPENAI_API_KEY)
@@ -110,11 +115,11 @@ model:
   #   It works with both no-auth and auth-enabled server modes.
   #
   # Can also be overridden for a single invocation with the --provider flag.
-  provider: "auto"
-  
+  provider: "custom"   # aiDAPTIV+: local OpenAI-compatible endpoint (see custom_providers below)
+
   # API configuration (falls back to OPENROUTER_API_KEY env var)
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
-  base_url: "https://openrouter.ai/api/v1"
+  base_url: "http://localhost:8080/v1"   # aiDAPTIV+ llama-server
 
   # Stream API responses from the provider (default: true). The agent core
   # prefers streaming for every turn — subagents included — for liveness
@@ -312,6 +317,27 @@ model:
 #     models:
 #       gpt-5.4:
 #         stale_timeout_seconds: 1800  # Longer non-stream stale timeout for slow large-context turns
+
+# =============================================================================
+# aiDAPTIV+ endpoint
+# =============================================================================
+# Phison aiDAPTIV+ llama-server. extra_body is sent on every request:
+#   cache_prompt         keep and reuse the prompt KV cache
+#   offload_folder_name  aiDAPTIV+ SSD folder that holds the offloaded KV cache
+#   enable_thinking      Gemma 4 thinking on
+# context_length must match llama-server's --ctx-size.
+custom_providers:
+  - name: aiDAPTIV
+    base_url: http://localhost:8080/v1
+    model: gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
+    models:
+      gemma-4-26B-A4B-it-UD-Q4_K_M.gguf:
+        context_length: 64000
+    extra_body:
+      cache_prompt: true
+      offload_folder_name: "Hermes"
+      chat_template_kwargs:
+        enable_thinking: true
 
 # =============================================================================
 # Unified Timeouts (operation deadlines)
@@ -687,7 +713,7 @@ tool_loop_guardrails:
 compression:
   # Enable automatic context compression (default: true)
   # Set to false if you prefer to manage context manually or want errors on overflow
-  enabled: true
+  enabled: false   # aiDAPTIV+: a summary rewrites the prompt prefix and breaks KV-cache reuse
 
   # Fail closed before lossy compaction unless an active memory provider that
   # implements the pre-compress checkpoint contract (API v2) confirms its
@@ -719,7 +745,7 @@ compression:
   # FAILURE notices + manual /compress feedback are always visible
   # regardless of this setting. (#52995)
   progress_notices: false
-  
+
   # Trigger compression at this % of model's context limit (default: 0.50 = 50%)
   # Lower values = more aggressive compression, higher values = compress later
   # Models with context windows below 512K are floored at 0.75 (raise-only) so
@@ -880,14 +906,11 @@ compression:
 # Anthropic prompt caching TTL
 # =============================================================================
 # When prompt caching is active (Claude via OpenRouter or native Anthropic),
-# Anthropic supports two TTL tiers for cached prefixes: "5m" and "1h". The
-# default "auto" picks per session: "1h" when a person types the turns (CLI,
-# TUI, Desktop, messaging), "5m" for subagents, cron, one-shots, webhooks,
-# Kanban, the API server and batch runs. "off" (or false/none/disabled/no)
-# turns prompt caching off entirely; any other unrecognised value means "5m".
+# Anthropic supports two TTL tiers for cached prefixes: "5m" (default) and
+# "1h". Other values are ignored and "5m" is used.
 #
-# prompt_caching:
-#   cache_ttl: "auto"   # or pin "5m" / "1h" for every session, or "off"
+prompt_caching:
+  cache_ttl: "5m" # use "1h" for long sessions with pauses between turns
 
 # =============================================================================
 # Auxiliary Models (Advanced — Experimental)
@@ -1039,15 +1062,15 @@ compression:
 #
 memory:
   # Agent's personal notes: environment facts, conventions, things learned
-  memory_enabled: true
-  
+  memory_enabled: false   # aiDAPTIV+: keeps MEMORY.md out of the system prompt
+
   # User profile: preferences, communication style, expectations
-  user_profile_enabled: true
+  user_profile_enabled: false   # aiDAPTIV+
 
   # External prefetch only: opt in to head/tail previews using hooks.output_spill.
   # Defaults to keeping the full provider-ranked recall. Restart to apply changes.
   prefetch_spill_enabled: false
-  
+
   # Character limits (~2.75 chars per token, model-independent)
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
@@ -1230,6 +1253,12 @@ skills:
   # external_dirs:
   #   - ~/.agents/skills
   #   - /home/shared/team-skills
+  external_dirs:   # aiDAPTIV+: ~ = C:\Users\<you> on Windows
+    - ~/.hermes/skills
+
+  # aiDAPTIV+: load the WrenAI skill into every session (stable prompt prefix).
+  auto_load:
+    - wren
 
 # =============================================================================
 # Agent Behavior
@@ -1238,7 +1267,40 @@ agent:
   # Maximum tool-calling iterations per conversation (default: 500)
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
-  max_turns: 500
+  max_turns: 90   # aiDAPTIV+
+
+  # aiDAPTIV+: toolsets switched off everywhere, so their tool schemas stay out
+  # of the prompt. Re-enable one by deleting its line (or `hermes tools`).
+  disabled_toolsets:
+    - a2a
+    - bot_room
+    - browser
+    - catalog
+    - clarify
+    - code_execution
+    - computer_use
+    - connections
+    - context_engine
+    - cronjob
+    - delegation
+    - desktop_ui
+    - discord
+    - discord_admin
+    - feishu_doc
+    - feishu_drive
+    - image_gen
+    - kanban
+    - memory
+    - onboarding
+    - project
+    - session_search
+    - stt
+    - todo
+    - tts
+    - video
+    - video_gen
+    - web
+    - x_search
 
   # Inactivity timeout for gateway agent runs (seconds, 0 = unlimited).
   # The agent can run indefinitely when actively calling tools or receiving
@@ -1327,12 +1389,6 @@ agent:
   # underneath this wrapper — this is the Hermes-level loop.
   # api_max_retries: 3
 
-  # zstd-compress requests to the official ChatGPT Codex endpoint on Python 3.14+,
-  # like the official Codex client. The endpoint rejects some valid zstd bodies
-  # with a bare HTTP 400; Hermes then resends that request once as plain JSON.
-  # Set false to always send plain JSON.
-  # codex_request_compression: true
-
   # Once api_max_retries AND the fallback chain are spent on a transient outage
   # (5xx, overloaded/529, connect/read timeouts) and nothing has been delivered
   # yet, Hermes waits and retries this many more cycles (jittered 15/30/60/60/60s;
@@ -1379,7 +1435,7 @@ agent:
   #     enabled: true
   #     effort: thinking
   reasoning_effort: "medium"
-  
+
   # Per-model reasoning effort overrides (optional dict)
   # Key: any sensible model spelling works (exact, dots↔dashes interchangeable,
   #      provider prefix optional). First match wins.
@@ -1443,6 +1499,10 @@ gateway:
   # its stack; "raise" fails the call (CI / development). Off by default.
   # sessiondb_loop_guard: off
 
+# aiDAPTIV+: every turn goes to the main (aiDAPTIV+) model.
+smart_model_routing:
+  enabled: false
+
 # =============================================================================
 # Toolsets
 # =============================================================================
@@ -1492,7 +1552,7 @@ gateway:
 #   google_chat:      hermes-google_chat      (same as telegram)
 #
 platform_toolsets:
-  cli: [hermes-cli]
+  cli: [file, skills, terminal, vision]   # aiDAPTIV+ (stock: [hermes-cli])
   telegram: [hermes-telegram]
   discord: [hermes-discord]
   whatsapp: [hermes-whatsapp]
@@ -2306,7 +2366,7 @@ updates:
   # Interactive terminal updates always prompt before restoring the autostash.
   #
   #   stash   - auto-stash before pull, then auto-restore after success (default)
-  #   discard - drop the update-created stash after success; use only on managed
+  #   discard - drop the update-created stash after success; use only on manageda
   #             installs where local source edits should not persist
   non_interactive_local_changes: "stash"
 

@@ -1,0 +1,24 @@
+name: customers
+properties:
+  description: "Table containing customer information and lifetime value metrics."
+table_reference:
+  catalog: "jaffle_shop"
+  schema: main
+  table: customers
+primary_key: customer_id
+columns:
+  - name: customer_id
+    type: INTEGER
+    not_null: true
+  - name: first_name
+    type: VARCHAR
+  - name: last_name
+    type: VARCHAR
+  - name: first_order
+    type: DATE
+  - name: most_recent_order
+    type: DATE
+  - name: number_of_orders
+    type: BIGINT
+  - name: customer_lifetime_value
+    type: DOUBLE
